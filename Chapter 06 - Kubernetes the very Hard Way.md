@@ -310,6 +310,275 @@ spec:
 - Now, put namespaces while listing container and you will be able to see the conatiner
     - `sudo nerdctl ps --namespace k8s.io`
 
+## Container Runtime Interface
+
+- The Container Runtime Interface (CRI) is a gRPC API that defines a standard interface for kubelet to interact with container runtimes. It enables kubelet to work with any CRI-compatible container runtime, without runtime-specific code compiled into kubelet.
+- Many container runtimes (such as containerd and CRI-O) implement the CRI natively, while others (like Docker) require a shim layer to bridge the gap between kubelet and the runtime.
+- Unlike other specifications mentioned earlier (OCI, CNI), which are Kubernetes-agnostic, the CRI is part of the Kubernetes project. Due to Kubernetes' dominance in container orchestration, many container runtimes now implement CRI natively for seamless integration.
+
+**The CRI API consists of two main services:**
+- **RuntimeService:** Manages pod sandboxes and containers (create, start, stop, remove, etc.)
+- **ImageService:** Manages container images (pull, list, remove, etc.)
+
+**When kubelet needs to:**
+
+- Create a pod: It calls the CRI RunPodSandbox method
+- Start a container: It calls the CRI CreateContainer and StartContainer methods
+- Pull an image: It calls the CRI PullImage method
+- Get pod status: It calls the CRI PodSandboxStatus method
+
+A **pod sandbox** is a shared environment in which containers of a pod run, filling the conceptual gap between the Kubernetes pod abstraction and the container runtime. When kubelet starts a Pod, it creates a pod sandbox first by calling the appropriate gRPC method. Once the sandbox is created, kubelet launches the pod's containers in the sandbox.
+
+### Installing crictl
+
+- Download and install crictl:
+
+```
+CRICTL_VERSION=v1.34.0
+
+curl -fsSLO "https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION?}/crictl-${CRICTL_VERSION?}-linux-amd64.tar.gz"
+
+sudo tar xzvof "crictl-${CRICTL_VERSION?}-linux-amd64.tar.gz" -C /usr/local/bin
+```
+
+- Configure `crictl`:
+
+`sudoedit /etc/crictl.yaml`
+
+💡 kubelet uses this below given same socket to communicate with containerd.
+
+```
+runtime-endpoint: unix:///var/run/containerd/containerd.sock
+image-endpoint: unix:///var/run/containerd/containerd.sock
+```
+
+### Using Crictl
+
+- **List all Pods**: `sudo crictl pods`
+- **List all Containers**: `sudo crictl ps -a`
+- **List all Images**: `sudo crictl images`
+- **Get detailed information about a pod**:
+```
+# First get the pod ID
+POD_ID=$(sudo crictl pods -q --name podinfo-worker)
+
+# Then get pod details
+sudo crictl inspectp $POD_ID
+```
+- **Execute a command in a container**:
+```
+# Get container ID
+CONTAINER_ID=$(sudo crictl ps -q --name podinfo)
+
+# Execute a command
+sudo crictl exec "$CONTAINER_ID" /bin/sh -c "ps aux"
+```
+- **View container logs**: `sudo crictl logs $CONTAINER_ID`
+
+## Installing Kubectl
+
+**kubeletctl** is a command-line tool that provides direct access to the kubelet API.
+
+**_Note_** - **kubectl** is the standard command-line tool for managing an entire Kubernetes cluster via the central API server, whereas **kubeletctl** is a specialized utility used to communicate directly with a single node's Kubelet API.
+
+### Download and install kubeletctl:
+
+```
+KUBELETCTL_VERSION=v1.13
+
+curl -fsSLO "https://github.com/cyberark/kubeletctl/releases/download/${KUBELETCTL_VERSION?}/kubeletctl_linux_amd64"
+
+sudo install -m 755 kubeletctl_linux_amd64 /usr/local/bin/kubeletctl
+```
+
+- Check the merged configuration: `kubeletctl configz | jq`
+- List all Pods: `kubeletctl pods`
+- Retrieve container logs: `kubeletctl containerLogs -p podinfo-worker -c podinfo`
+- Execute a command in a container: `kubeletctl exec "ls /" -p podinfo-worker -c podinfo`
+
+# ETCD
+
+Every Kubernetes resource you create (Pods, Services, Deployments) has to live somewhere. In this lesson, you'll install etcd, the distributed key-value store that holds the entire cluster state.
+
+**Objectives**:
+
+- Understand etcd's role within a Kubernetes cluster
+- Install and configure etcd from scratch
+- Learn how to interact with etcd using the etcdctl command-line tool
+- Secure etcd with TLS certificates for encrypted communication
+
+
+## Definition
+
+- **etcd** is a distributed key-value store that serves as the primary data store for all cluster state in Kubernetes. It stores configuration data, state information, and metadata for the entire cluster.
+- **etcd** implements the Raft consensus algorithm to ensure consistency across multiple nodes. The cluster can continue operating even if some nodes fail, as long as a majority of nodes (a quorum) remain healthy.
+- **etcd's** strong consistency guarantee requires that all consistency-sensitive operations (for example, any write operations) flow through a leader node, which gets elected through the Raft consensus algorithm.
+
+![etcd-containerd-in-k8s](./assets/etcd-containerd-in-k8s.png)
+
+## Installing etcd
+
+### Download and install etcd:
+
+```
+ETCD_VERSION=v3.6.4
+
+curl -fsSLO "https://github.com/etcd-io/etcd/releases/download/${ETCD_VERSION?}/etcd-${ETCD_VERSION?}-linux-amd64.tar.gz"
+
+tar xzvof "etcd-${ETCD_VERSION?}-linux-amd64.tar.gz"
+
+sudo install -m 755 "etcd-${ETCD_VERSION?}-linux-amd64"/{etcd,etcdctl,etcdutl} /usr/local/bin
+
+etcdctl completion bash | sudo tee /etc/bash_completion.d/etcdctl
+```
+
+### Create a dedicated user for the etcd service:
+```
+sudo adduser \
+    --system \
+    --group \
+    --disabled-login \
+    --disabled-password \
+    --home /var/lib/etcd \
+    etcd
+```
+
+### Download the systemd unit file for etcd:
+
+`sudo wget -O /etc/systemd/system/etcd.service https://labs.iximiuz.com/content/files/courses/kubernetes-the-very-hard-way-0cbfd997/03-control-plane/01-etcd/__static__/etcd.service?v=1777378794`
+
+### Start the etcd service:
+
+```
+sudo systemctl daemon-reload
+sudo systemctl enable --now etcd
+```
+## Interacting with etcd
+
+With etcd installed and running, you can now explore its capabilities.
+- **etcd exposes both HTTP and gRPC APIs**. You can test the HTTP API using curl:
+`curl http://127.0.0.1:2379/health`
+- However, `etcdctl` provides a more convenient way to interact with etcd: `etcdctl endpoint health`
+
+As a key-value store, etcd allows you to store and retrieve data in the form of key-value pairs:
+- **Put value** : `etcdctl put foo bar`
+- **Get Key Value** : `etcdctl get foo`
+- **Print only Value** : `etcdctl get foo --print-value-only`
+
+**Create some keys with a path-like structure:**
+```
+etcdctl put /foo bar
+etcdctl put /foo/bar baz
+etcdctl put /foo/bar/baz bat
+```
+- **Retrieve all keys starting with `/foo`** : `etcdctl get --prefix /foo --keys-only`
+
+### Securing Data in Transit
+
+Securing etcd with TLS is critical in any production Kubernetes cluster: without proper TLS encryption, sensitive information travels in plaintext over the wire.
+
+**This exposes critical data to anyone who can intercept network traffic**:
+- ServiceAccount tokens
+- TLS certificates
+- Cluster configuration
+- Secrets and ConfigMaps
+
+**TLS provides more than just encryption, though. It also enables authenticating clients via mTLS (mutual TLS) authentication, ensuring that only authorized components can access or modify cluster state data.**
+
+- Create a directory:
+```
+sudo mkdir -p /etc/etcd/pki
+cd /etc/etcd/pki
+```
+- Create a **Certificate Authority (CA)** to sign certificates:
+```
+sudo openssl genrsa -out ca.key 4096
+sudo openssl req -x509 -new -nodes -key ca.key -out ca.crt -subj "/CN=etcd" -sha256 -days 3650
+```
+- Create a config file for the **server certificate**:
+```
+cat <<EOF | sudo tee server.cnf
+[ req ]
+default_bits       = 2048
+distinguished_name = req_distinguished_name
+req_extensions     = req_ext
+prompt             = no
+
+[ req_distinguished_name ]
+CN = server
+
+[ req_ext ]
+subjectAltName = @alt_names
+
+[ alt_names ]
+DNS.1 = localhost
+DNS.2 = $(hostname)
+IP.1  = 127.0.0.1
+IP.2  = ::1
+IP.3 = $(ip -o -4 addr show | grep 'eth' | awk '{split($4,a,"/"); print a[1]}' | paste -sd,)
+EOF
+```
+- Generate the **server certificate**:
+```
+sudo openssl genrsa -out server.key 2048
+sudo openssl req -new -key server.key -out server.csr -config server.cnf
+sudo openssl x509 -req -in server.csr -out server.crt \
+  -CA ca.crt -CAkey ca.key \
+  -days 365 -extfile server.cnf -extensions req_ext
+```
+- Generate a **client certificate** for the Kubernetes API server and other etcd clients:
+```
+sudo openssl genrsa -out client.key 2048
+sudo openssl req -new -key client.key -out client.csr -subj "/CN=etcd/O=etcd"
+sudo openssl x509 -req -in client.csr -out client.crt \
+  -CA ca.crt -CAkey ca.key \
+  -days 365
+```
+- Set ownership of all generated certificates and keys to the etcd user: `sudo chown -R etcd:etcd .`
+- Make the client key accessible to all users: `sudo chmod 644 client.key`
+
+> [!CAUTION]
+> Above ensures all users (including the lab user) can authenticate with etcd.
+> **In production environments, this is NOT recommended**.
+
+- Go back to the home directory: `cd`
+- Configure etcd to use TLS for server connections and mutual TLS for client authentication:
+```
+cat <<EOF | sudo tee -a /etc/default/etcd
+
+ETCD_LISTEN_CLIENT_URLS=https://0.0.0.0:2379
+
+ETCD_CLIENT_CERT_AUTH=true
+ETCD_CERT_FILE=/etc/etcd/pki/server.crt
+ETCD_KEY_FILE=/etc/etcd/pki/server.key
+ETCD_TRUSTED_CA_FILE=/etc/etcd/pki/ca.crt
+
+ETCD_NAME=$(hostname)
+ETCD_ADVERTISE_CLIENT_URLS=https://$(hostname):2379
+
+EOF
+```
+
+- Restart the etcd service to apply the changes: `sudo systemctl restart etcd`
+- Configure etcdctl to communicate with etcd using TLS:
+```
+cat <<EOF | tee -a "$HOME/.bashrc" "$HOME/.profile"
+
+export ETCDCTL_CACERT=/etc/etcd/pki/ca.crt
+export ETCDCTL_CERT=/etc/etcd/pki/client.crt
+export ETCDCTL_KEY=/etc/etcd/pki/client.key
+export ETCDCTL_ENDPOINTS=https://127.0.0.1:2379
+EOF
+```
+
+- Verify that you can communicate with etcd using TLS:
+`bash --login -c "etcdctl endpoint health"`
+
+
+
+
+
+
 ## Glossary:
 - CTR 
     - Containerd includes a CLI tool called ctr for basic container operations. 
