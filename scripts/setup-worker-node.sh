@@ -209,7 +209,7 @@ cgroupDriver: systemd'
 
   # Lab-only: open the kubelet API on :10250 so curl can poke it.
   # NEVER do this on a real cluster.
-  write_file "${KUBELET_CONFIG_DIR}/10-auth.conf" 'apiVersion: kubelet.config.k8s.io/v1beta1
+  write_file "${KUBELET_CONFIG_DIR}/70-authnz.conf" 'apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 
 # WARNING: lab setup only - do not disable auth in production.
