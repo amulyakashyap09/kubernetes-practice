@@ -1,5 +1,4 @@
-
-## containerd
+# containerd
 
 - containerd is an industry-standard container runtime that provides the fundamental tools for running containers.
 - Originally developed by Docker, containerd is now maintained by the CNCF and has become one of the most widely adopted container runtimes in the cloud-native ecosystem.
@@ -23,7 +22,6 @@ CONTAINERD_VERSION=2.2.1
 curl -fsSLO "https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VERSION?}/containerd-${CONTAINERD_VERSION?}-linux-amd64.tar.gz"
 
 sudo tar xzvofC "containerd-${CONTAINERD_VERSION?}-linux-amd64.tar.gz" /usr/local
-
 ```
 
 #### Download the systemd unit file to run containerd as a systemd service:
@@ -170,6 +168,147 @@ sudo nerdctl ps
 PODINFO_IP=$(sudo nerdctl inspect --format '{{ .NetworkSettings.IPAddress }}' podinfo)
 curl -f "http://${PODINFO_IP}:9898"
 ```
+
+# Kubelet
+
+kubelet is the primary node agent that runs on every worker node in a Kubernetes cluster. As one of the core components that makes Kubernetes work, it acts as the bridge between the Kubernetes control plane and the container runtime on each node.
+
+kubelet operates in a continuous reconciliation loop:
+
+- **Watches** for Pod specifications from the API server
+- **Compares** the desired state (what should be running) with the actual state (what is running)
+- **Takes action** to bring the actual state in line with the desired state
+- **Reports** the current status back to the control plane
+
+## Download and install kubelet:
+
+```
+KUBE_VERSION=v1.34.0
+
+curl -fsSLO "https://dl.k8s.io/${KUBE_VERSION?}/bin/linux/amd64/kubelet"
+
+sudo install -m 755 kubelet /usr/local/bin
+```
+
+## Download the systemd unit file for kubelet:
+
+```
+sudo wget -O /etc/systemd/system/kubelet.service https://labs.iximiuz.com/content/files/courses/kubernetes-the-very-hard-way-0cbfd997/02-worker-node/02-kubelet/__static__/kubelet.service?v=1777378794
+```
+
+## Configure the kubelet
+```
+sudo mkdir -p /var/lib/kubelet/config.d
+sudoedit /var/lib/kubelet/config.d/99-cri.conf
+```
+
+```
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+
+containerRuntimeEndpoint: unix:///var/run/containerd/containerd.sock
+cgroupDriver: systemd
+```
+
+## Start the kubelet
+```
+sudo systemctl daemon-reload
+sudo systemctl enable --now kubelet
+```
+
+## Kubelet API
+
+- kubelet exposes an HTTP API endpoint (typically on port 10250) that allows the Kubernetes API server and other components to interact with it.
+
+This endpoint provides access to:
+- Pod logs and exec sessions
+- Node metrics and health information
+
+Normally, this endpoint is secured using TLS and authentication/authorization mechanisms. However, for the purposes of this lesson, you will disable authentication and authorization to simplify the setup.
+
+![kublet-api-in-k8s.png](./assets/kublet-api-in-k8s.png)
+
+### Configure kubelet to disable authentication and authorization:
+
+**⚠️ Do NOT disable authentication and authorization in production environments.**
+
+Configure kubelet to disable authentication and authorization:
+
+```
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+
+authentication:
+  anonymous:
+    enabled: true
+  webhook:
+    enabled: false
+
+authorization:
+  mode: AlwaysAllow
+```
+
+#### Restart the kubelet
+
+`sudo systemctl restart kubelet`
+
+#### Verify the running kubelet
+
+`curl -k https://localhost:10250/healthz`
+
+## Static Pods
+
+- Static Pods are Pods managed directly by kubelet on a specific node rather than by the Kubernetes API server.
+- Unlike regular Pods that are created and managed through the cluster's control plane, static Pods are defined by placing Pod manifest files in a directory that kubelet monitors.
+- When kubelet finds a Pod manifest in the static Pod directory, it automatically creates and manages that Pod. If the Pod crashes or stops, kubelet automatically restarts it (through the container runtime).
+- Kubelet also creates a mirror Pod in the Kubernetes API server for each static Pod. This mirror Pod allows you to see the static Pod when you run kubectl get pods, but you cannot control the static Pod through the API server: only kubelet can manage it directly.
+
+**⚠️ Due to their nature, static Pods cannot reference other Kubernetes API objects like Secrets, ConfigMaps, or ServiceAccounts.**
+
+**They can only use resources available directly on the node, such as hostPath or emptyDir volumes.**
+
+### configure the static Pods
+```
+sudoedit /var/lib/kubelet/config.d/50-static-pods.conf
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+
+staticPodPath: /etc/kubernetes/manifests
+```
+### Restart the kubelet service to apply the configuration changes:
+
+`sudo systemctl restart kubelet`
+
+### Create Static Pod
+
+```
+sudoedit /etc/kubernetes/manifests/podinfo.yaml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: podinfo
+spec:
+  hostNetwork: true
+  containers:
+    - name: podinfo
+      image: ghcr.io/stefanprodan/podinfo:latest
+      ports:
+        - containerPort: 9898
+```
+
+#### Verify Static Pod Running:
+
+`curl -sfk https://localhost:10250/pods | jq '.items[0].metadata'`
+`curl http://localhost:9898 | jq` - verify application is running successfully
+
+### Note:
+- Though application is running but static pods are not visible, when you list container 
+    - `sudo nerdctl ps`
+- This happens because containerd organizes containers into namespaces (similar to Kubernetes), and Kubernetes uses the k8s.io namespace by default.
+    - `sudo ctr namespace ls`
+- Now, put namespaces while listing container and you will be able to see the conatiner
+    - `sudo nerdctl ps --namespace k8s.io`
 
 ## Glossary:
 - CTR 
